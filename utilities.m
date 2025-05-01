@@ -1433,6 +1433,42 @@ classdef utilities
                 'windSpeed',[atm.layer.windSpeed],'windDirection',...
                 [atm.layer.windDirection]);
         end
+
+        function [fieldStopSize,resolution,actualPixelSize] = pixelSize(wvl,D,nSubap,nPixSubap,pixelSizeValue)
+            %% SIMULATION SAMPLING / RESOLUTION
+            %
+            % Function gives you the appropriate field_stop size and
+            % tel.resolution in order to obtain the desired pixel size (
+            % arcsec)
+            %
+            % Example:: 
+            %
+            
+            diffLimit=(wvl/(D/nSubap))*206265;
+            %Detector size
+            detectorSize=nPixSubap*nSubap;
+            %FOV of a lenslet
+            fovLenslet=nPixSubap*pixelSizeValue;
+            %we calculate the FOV in unit diffraction limit
+            x=fovLenslet/diffLimit;
+            %We get the next integer value to be able to implement the value in the
+            %simulation
+            fieldStop=ceil(x);
+            if mod(fieldStop,nPixSubap)~=0
+                fieldStop=fieldStop + (nPixSubap - rem(fieldStop,nPixSubap));
+            end
+            resolution=fieldStop*nSubap;
+            %we get the pixel size used in the simulation
+            actualPixelSize=fieldStop*diffLimit/nPixSubap;
+            if pixelSizeValue<diffLimit/2 % under that value the pixel size will be lambda/2D
+                fieldStopSize=fieldStop/2;
+                actualPixelSize=actualPixelSize/2; % the closest match
+            else
+                fieldStopSize=fieldStop;   % wfs.fieldstopsize value
+                actualPixelSize=actualPixelSize; % the closest match
+            end
+
+        end
 %%
        function [zenith,azimuth] = arcsec2polar(x,y)
             [TH, RHO] = cart2pol(x,y);

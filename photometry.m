@@ -64,6 +64,7 @@ classdef photometry
         I8  ( 0.750e-6 , 0.100e-6 , 2.7e12 )
         I9  ( 0.850e-6 , 0.300e-6 , 7.36e12 )
         I10  ( 0.900e-6 , 0.300e-6 , 7.36e12 )
+        Z  ( 1.015e-6 , 0.170e-6 , 2.2e12 ) % ZP guessed (mlamb), filter from GSAOI
         J  ( 1.215e-6 , 0.260e-6 , 1.9e12 )
         H  ( 1.654e-6 , 0.290e-6 , 1.1e12 )
         Kp ( 2.1245e-6 , 0.351e-6 , 6e11 )
@@ -74,7 +75,9 @@ classdef photometry
         N  ( 10.50e-6 , 2.500e-6 , 2.1e10 ) % ZP guessed-estimate (ccorreia)
         Na ( 0.589e-6 , 0        , 3.3e12 )
         EOS ( 1.064e-6 , 0        , 3.3e12 )
-        HK  ( (1.654e-6*1.1e12+2.179e-6*7.0e11)/(1.1e12+7.0e11) , 0.290e-6+00.410e-6 , 1.1e12+7.0e11 )
+        %HK  ( (1.654e-6*1.1e12+2.179e-6*7.0e11)/(1.1e12+7.0e11) , 0.290e-6+00.410e-6 , 1.1e12+7.0e11 )
+        HK  ( ((1.630e-6+2.350e-6)/2) , (2.350 - 1.630), 1.1e12+7.0e11 )
+        Acq  ( 1.4e-6 , 0.600e-6 , 1.0e12 )
         
         %% Custom bands for specific applications
         BenchIR (1.738e-6,0.030e-6,1.1e12)
@@ -84,6 +87,8 @@ classdef photometry
         TFu_J (1.2e-6 , 0        , 1e12 )
         TFu_Y (1.0e-6 , 0        , 1e12 )
         TFu_I (0.8e-6 , 0        , 1e12 )
+
+        I4b  ( 0.710e-6 , 0.120e-6 , 1.1e13 )
  end
     
 end
