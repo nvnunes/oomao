@@ -89,6 +89,10 @@ classdef photometry
         TFu_I (0.8e-6 , 0        , 1e12 )
 
         I4b  ( 0.710e-6 , 0.120e-6 , 1.1e13 )
+
+        % GIRMOS start/end of spectroscopy wavelength range
+        Gs (0.95e-6, 0, 1e12)
+        Ge (2.35e-6, 0, 1e12)
  end
     
 end
