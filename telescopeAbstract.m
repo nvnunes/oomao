@@ -201,12 +201,18 @@ classdef telescopeAbstract < handle
             end
         end
         
-        function draw(obj)
-            %% DRAW Reset the atmosphere phase screens
+        function draw(obj,resetStepping)
+            %% DRAW Draw fresh atmosphere screens without rewinding the RNG
             %
-            % draw(obj) reet the phase screens of the layers
+            % draw(obj) preserves the existing phase-evolution timing.
+            % draw(obj,true) also clears stepping counters and offsets for
+            % a new realization, retaining cached evolution matrices.
             
             for kLayer=1:obj.atm.nLayer
+                if nargin>1 && resetStepping
+                    obj.count{kLayer} = [0 0];
+                    obj.offSetInMeter{kLayer} = [0 0];
+                end
                 m_atm = slab(obj.atm,kLayer);
                 %                 fprintf('   Layer %d:\n',kLayer)
                 %                 fprintf('            -> Computing initial phase screen (D=%3.2fm,n=%dpx) ...',m_atm.layer.D,m_atm.layer.nPixel)
