@@ -8,3 +8,6 @@ tests.text
 /ccorreia/papers/*
 ccorreia/spatialFrequencyAO/pyramidCaseStudy/*.eps
 ccorreia/spatialFrequencyAO/pyramidCaseStudy/*.fig
+
+# Native kernels are built for the local MATLAB platform.
+*.mex*

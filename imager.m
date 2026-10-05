@@ -100,7 +100,11 @@ classdef imager < detector
 %                     flush(obj,src);
 %                 end
 %             end
-              readOut(obj,obj.imgLens.imagelets)
+              if obj.imgLens.singlePrecision
+                  readOut(obj,double(obj.imgLens.imagelets))
+              else
+                  readOut(obj,obj.imgLens.imagelets)
+              end
               if obj.frameCount==0 && obj.startDelay==0
                   flush(obj,length(src))
                   %flush(obj)

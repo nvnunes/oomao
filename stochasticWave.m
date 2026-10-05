@@ -5,6 +5,8 @@ classdef stochasticWave < handle
         % mask to retain amplitude and phase values used for statistics
         % moments evaluation
         mask;
+        % Form concatenated pupils with the double-precision native kernel.
+        useNativePupil = false;
         % true if the phase is a stochastic property
         stochasticPhase = true;
         % true if the amplitude is a stochastic property
@@ -211,7 +213,11 @@ classdef stochasticWave < handle
             %
             % out = catWave(obj) concatenates the waves of an array of
             % stochasticWave objects
-            out = cat( ndims(obj) , obj.wave);
+            if ~isempty(obj) && ndims(obj)==2 && all([obj.useNativePupil])
+                out = oomao_pupil_mex({obj.p_amplitude},{obj.p_phase},{obj.mask});
+            else
+                out = cat( ndims(obj) , obj.wave);
+            end
         end
         
         function out = mean(obj)

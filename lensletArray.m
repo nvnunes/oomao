@@ -7,6 +7,8 @@ classdef lensletArray < handle
     properties
         % the # of lenslet on one side of the lenslet array
         nLenslet;
+        % Use single-precision diffraction; detector accumulation stays double.
+        singlePrecision = false;
         % lenslet size
         pitch;
         % the minimum amount of light per lenslet
@@ -406,6 +408,9 @@ classdef lensletArray < handle
                 end
                 val = src.catWave;
             end
+            if obj.singlePrecision
+                val = single(val);
+            end
             [nLensletsWavePx,nLensletsWavePxNGuideStar,nWave] = size(val);
             if ndims(src)==3 || nWave>1 
                 obj.nArray = 1;
@@ -440,7 +445,11 @@ classdef lensletArray < handle
             end
             nOutWavePx = max(nOutWavePx,obj.nLensletWavePx);
             nLensletSquareWavePx    = obj.nLensletWavePx*obj.nLenslet^2*nLensletArray;
-            wavePrgted = zeros(nOutWavePx,nLensletSquareWavePx);
+            if obj.singlePrecision
+                wavePrgted = zeros(nOutWavePx,nLensletSquareWavePx,'like',val);
+            else
+                wavePrgted = zeros(nOutWavePx,nLensletSquareWavePx);
+            end
             val        = val./nOutWavePx;
 %             nLensletWavePx   = obj.nLensletWavePx;
             if obj.convKernel == false
@@ -483,7 +492,11 @@ classdef lensletArray < handle
                 % Shape the wave per rows of lenslet pixels
                 val       = reshape(val,obj.nLensletWavePx,nLensletsImagePx*obj.nLenslet*nLensletArray);
                 u         = any(val); % Index of non-zeros columns
-                wavePrgted = zeros(nOutWavePx,nLensletsImagePx*obj.nLenslet*nLensletArray);
+                if obj.singlePrecision
+                    wavePrgted = zeros(nOutWavePx,nLensletsImagePx*obj.nLenslet*nLensletArray,'like',val);
+                else
+                    wavePrgted = zeros(nOutWavePx,nLensletsImagePx*obj.nLenslet*nLensletArray);
+                end
                 wavePrgted(:,u)  = fftshift(fft(val(:,u),nOutWavePx),1);
                 wavePrgted(v,:) = [];
             else
@@ -516,7 +529,11 @@ classdef lensletArray < handle
                 % Shape the wave per rows of lenslet pixels
                 val       = reshape(val,obj.nLensletWavePx,nLensletsImagePx*obj.nLenslet*nLensletArray);
                 u         = any(val); % Index of non-zeros columns
-                wavePrgted = zeros(nOutWavePx,nLensletsImagePx*obj.nLenslet*nLensletArray);
+                if obj.singlePrecision
+                    wavePrgted = zeros(nOutWavePx,nLensletsImagePx*obj.nLenslet*nLensletArray,'like',val);
+                else
+                    wavePrgted = zeros(nOutWavePx,nLensletsImagePx*obj.nLenslet*nLensletArray);
+                end
                 wavePrgted(:,u)  = fft(val(:,u),nOutWavePx);
                 wavePrgted(v,:) = [];
             end

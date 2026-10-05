@@ -39,6 +39,8 @@ classdef telescopeAbstract < handle
         wavelengthListener;
         % wind shifted turbulence sampling time
         samplingTime;
+        % Use the precompiled double-precision interpolation kernel.
+        useNativeInterpolation = false;
         leap
     end
     
@@ -676,6 +678,11 @@ classdef telescopeAbstract < handle
                         srcDirectionVector2 = src.directionVector(2);
                         srcHeight = src.height;
                         m_origin = obj.origin;
+                        if obj.useNativeInterpolation
+                            out = oomao_atmosphere_mex(phase_m,layerSampling_m,altitude_m, ...
+                                size(src.amplitude,1),sampler_m,R_, ...
+                                [srcDirectionVector1,srcDirectionVector2],m_origin,srcHeight);
+                        else
                         out = zeros(size(src.amplitude,1),size(src.amplitude,2),nLayer);
                         nOut = size(out,1);
                         try % check whether a parpool exist or can be created
@@ -738,6 +745,7 @@ classdef telescopeAbstract < handle
                             end
                         end
                         out = sum(out,3);
+                        end
                     end
                     %                     out = (obj.atm.wavelength/src.wavelength)*out; % Scale the phase according to the src wavelength
                     out = (obj.phaseScreenWavelength/src.wavelength)*out; % Scale the phase according to the src wavelength
