@@ -7,6 +7,8 @@ classdef stochasticWave < handle
         mask;
         % Form concatenated pupils with the double-precision native kernel.
         useNativePupil = false;
+        % Run-owned numerical backend; geometry and source state stay native.
+        execution = [];
         % true if the phase is a stochastic property
         stochasticPhase = true;
         % true if the amplitude is a stochastic property
@@ -47,6 +49,11 @@ classdef stochasticWave < handle
     end
     
     properties (Access=private)
+        fastAmplitudeExecution=[];
+        fastAmplitudeSnapshot=[];
+        fastMaskSnapshot=[];
+        fastMaskedAmplitude=[];
+        fastAmplitudeValid=false;
         p_bufSeq;
         bufferLength = 10000;
         kBufSeq;
@@ -75,11 +82,36 @@ classdef stochasticWave < handle
         
         %% Get/Set amplitude
         function out = get.amplitude(obj)
-            out = obj.p_amplitude;
-            out = bsxfun(@times,out,obj.mask);
+            eligible=~isempty(obj.execution)&&obj.execution.Fast&& ...
+                isa(obj.p_amplitude,'double')&&isreal(obj.p_amplitude)&&~issparse(obj.p_amplitude)&& ...
+                islogical(obj.mask)&&~issparse(obj.mask)&&ndims(obj.mask)==2;
+            if eligible
+                same=obj.fastAmplitudeValid&&isequal(obj.fastAmplitudeExecution,obj.execution)&& ...
+                    obj.execution.sameArrayStorage(obj.p_amplitude,obj.fastAmplitudeSnapshot)&& ...
+                    obj.execution.sameArrayStorage(obj.mask,obj.fastMaskSnapshot);
+                if ~same
+                    out=bsxfun(@times,obj.p_amplitude,obj.mask);
+                    if isequal(out,obj.p_amplitude),out=obj.p_amplitude;end
+                    obj.fastAmplitudeExecution=obj.execution;obj.fastAmplitudeSnapshot=obj.p_amplitude;obj.fastMaskSnapshot=obj.mask;
+                    obj.fastMaskedAmplitude=out;obj.fastAmplitudeValid=true;
+                end
+                out=obj.fastMaskedAmplitude;
+            else
+                obj.fastAmplitudeValid=false;
+                obj.fastAmplitudeExecution=[];obj.fastAmplitudeSnapshot=[];obj.fastMaskSnapshot=[];obj.fastMaskedAmplitude=[];
+                out=bsxfun(@times,obj.p_amplitude,obj.mask);
+            end
         end
         function set.amplitude(obj,val)
-            obj.p_amplitude = bsxfun( @times, obj.p_amplitude , val);
+            fast=~isempty(obj.execution)&&obj.execution.Fast&& ...
+                isa(obj.p_amplitude,'double')&&isreal(obj.p_amplitude)&&~issparse(obj.p_amplitude)&& ...
+                isa(val,'double')&&isreal(val)&&~issparse(val);
+            if fast&&isscalar(val)&&val==1,return;end
+            if fast&&isscalar(obj.p_amplitude)&&obj.p_amplitude==1
+                obj.p_amplitude=val;
+            else
+                obj.p_amplitude=bsxfun(@times,obj.p_amplitude,val);
+            end
         end
     
         %% Get/Set phaseUnmasked
@@ -92,7 +124,14 @@ classdef stochasticWave < handle
             out = bsxfun(@times,out,obj.mask);
         end
         function set.phase(obj,val)
-            obj.p_phase = bsxfun( @plus, obj.p_phase , val);
+            fast=~isempty(obj.execution)&&obj.execution.Fast&& ...
+                isa(obj.p_phase,'double')&&isreal(obj.p_phase)&&~issparse(obj.p_phase)&& ...
+                isa(val,'double')&&isreal(val)&&~issparse(val);
+            if fast&&isscalar(obj.p_phase)&&obj.p_phase==0
+                obj.p_phase=val;
+            elseif ~(fast&&isscalar(val)&&val==0)
+                obj.p_phase=bsxfun(@plus,obj.p_phase,val);
+            end
             if obj.logging
                 buf = stats(obj,@var);
                 if isempty(obj.phaseVar)
@@ -208,12 +247,30 @@ classdef stochasticWave < handle
             
             out = cat( ndims(obj) , obj.meanRmPhase);
         end
+        function supported=hasSinglePupil(obj,n)
+% Eligibility only; default/uninitialized and multi-wave sources use catWave.
+            supported=~isempty(obj)&&ndims(obj)==2&&isscalar(n)&&n>=2;
+            if ~supported,return;end
+            for k=1:numel(obj)
+                a=obj(k).p_amplitude;p=obj(k).p_phase;m=obj(k).mask;
+                if ~isa(a,'double')||~isreal(a)||issparse(a)||~isa(p,'double')||~isreal(p)||issparse(p)|| ...
+                  ~islogical(m)||issparse(m)||~isequal(size(m),[n,n])|| ...
+                  ~(isscalar(a)||isequal(size(a),[n,n]))||~(isscalar(p)||isequal(size(p),[n,n]))
+                    supported=false;return
+                end
+            end
+        end
+        function out=diffractPupil(obj,execution,phasor,nout,crop,start,precision)
+            out=execution.diffractPupil({obj.p_amplitude},{obj.p_phase},{obj.mask},phasor,nout,crop,start,precision);
+        end
         function out = catWave(obj)
             %% CATWAVE Concatenate waves
             %
             % out = catWave(obj) concatenates the waves of an array of
             % stochasticWave objects
-            if ~isempty(obj) && ndims(obj)==2 && all([obj.useNativePupil])
+            if ~isempty(obj) && ndims(obj)==2 && ~isempty(obj(1).execution) && obj(1).execution.Fast
+                out = obj(1).execution.formPupil({obj.p_amplitude},{obj.p_phase},{obj.mask});
+            elseif ~isempty(obj) && ndims(obj)==2 && all([obj.useNativePupil])
                 out = oomao_pupil_mex({obj.p_amplitude},{obj.p_phase},{obj.mask});
             else
                 out = cat( ndims(obj) , obj.wave);

@@ -9,6 +9,8 @@ classdef lensletArray < handle
         nLenslet;
         % Use single-precision diffraction; detector accumulation stays double.
         singlePrecision = false;
+        % Per-run numerical dispatch; singlePrecision owns this lenslet precision.
+        execution = [];
         % lenslet size
         pitch;
         % the minimum amount of light per lenslet
@@ -257,12 +259,7 @@ classdef lensletArray < handle
             % detector pixel scale which after binning may be different
             % from this one
             
-            nOutWavePx    = obj.nLensletWavePx*obj.fftPad;    % Pixel length of the output wave
-            evenOdd       = rem(obj.nLensletWavePx,2);
-            if ~rem(nOutWavePx,2) && evenOdd
-                nOutWavePx = nOutWavePx + evenOdd;
-            end
-            nOutWavePx = max(nOutWavePx,obj.nLensletWavePx);
+            nOutWavePx = obj.outputWaveSampling();
             out = skyAngle( (src.wavelength/tel.D)*obj.nLensletWavePx*obj.nLenslet/nOutWavePx);
             % show also in mas 
             out.unit = 'mas';
@@ -351,6 +348,16 @@ classdef lensletArray < handle
                 val = reshape(val, nx, ny*nSrc_);
                 
             else % no offset case
+                if ~isempty(obj.execution)&&obj.execution.Fast&&obj.singlePrecision&&obj.nLenslet==1 ...
+                  &&~obj.convKernel&&~obj.sumStack&&isempty(obj.elongatedFieldStopSize) ...
+                  &&isempty(obj.opticalAberration)&&src.hasSinglePupil(obj.nLensletWavePx)
+                    obj.nArray=numel(src);nOutWavePx=obj.outputWaveSampling();crop=obj.nLensletImagePx;
+                    center=ceil((nOutWavePx+1)/2);
+                    if ~isempty(obj.fftPhasor),center=center+rem(obj.nLensletWavePx,2);end
+                    start=center-floor(crop/2)-1;
+                    wavePrgted=src.diffractPupil(obj.execution,obj.fftPhasor,nOutWavePx,crop,start,64-32*double(obj.singlePrecision));
+                    return
+                end
                 val = src.catWave; % get complex amplitudes
             end
             
@@ -408,7 +415,9 @@ classdef lensletArray < handle
                 end
                 val = src.catWave;
             end
-            if obj.singlePrecision
+            if ~isempty(obj.execution)
+                val = obj.execution.prepareDiffraction(val,64-32*double(obj.singlePrecision));
+            elseif obj.singlePrecision
                 val = single(val);
             end
             [nLensletsWavePx,nLensletsWavePxNGuideStar,nWave] = size(val);
@@ -438,12 +447,17 @@ classdef lensletArray < handle
 %             end
 %             nOutWavePx    = obj.nLensletImagePx*obj.fftPad;    % Pixel length of the output wave
 %             evenOdd       = rem(obj.nLensletImagePx,2);
-            nOutWavePx    = obj.nLensletWavePx*obj.fftPad;    % Pixel length of the output wave
-            evenOdd       = rem(obj.nLensletWavePx,2);
-            if ~rem(nOutWavePx,2) && evenOdd
-                nOutWavePx = nOutWavePx + evenOdd;
+            nOutWavePx = obj.outputWaveSampling();
+            if ~isempty(obj.execution) && obj.execution.Fast ...
+                    && obj.nLenslet==1 && nWave==1 && ~obj.convKernel && ~obj.sumStack ...
+                    && isempty(obj.elongatedFieldStopSize) && ~any(obj.offset(:)) && ~any(obj.rotation(:))
+                crop=obj.nLensletImagePx;
+                center=ceil((nOutWavePx+1)/2);
+                if ~isempty(obj.fftPhasor),center=center+rem(obj.nLensletWavePx,2);end
+                start=center-floor(crop/2)-1;
+                wavePrgted=obj.execution.diffract(val,obj.fftPhasor,nOutWavePx,crop,start);
+                return
             end
-            nOutWavePx = max(nOutWavePx,obj.nLensletWavePx);
             nLensletSquareWavePx    = obj.nLensletWavePx*obj.nLenslet^2*nLensletArray;
             if obj.singlePrecision
                 wavePrgted = zeros(nOutWavePx,nLensletSquareWavePx,'like',val);
@@ -466,7 +480,7 @@ classdef lensletArray < handle
                 % Shape the wave per columns of lenslet pixels
                 val       = reshape(val,obj.nLensletWavePx,nLensletSquareWavePx);
                 u         = any(val); % Index of non-zeros columns
-                wavePrgted(:,u) = fftshift(fft(val(:,u),nOutWavePx),1);
+                wavePrgted(:,u) = fftshift(obj.fourier(val(:,u),nOutWavePx),1);
                 % Select the field of view
                 v = [];
                 if nOutWavePx>nLensletImagePx
@@ -497,7 +511,7 @@ classdef lensletArray < handle
                 else
                     wavePrgted = zeros(nOutWavePx,nLensletsImagePx*obj.nLenslet*nLensletArray);
                 end
-                wavePrgted(:,u)  = fftshift(fft(val(:,u),nOutWavePx),1);
+                wavePrgted(:,u)  = fftshift(obj.fourier(val(:,u),nOutWavePx),1);
                 wavePrgted(v,:) = [];
             else
             %%% EVEN # OF PIXELS PER LENSLET
@@ -506,7 +520,7 @@ classdef lensletArray < handle
                 % Shape the wave per columns of lenslet pixels
                 val       = reshape(val,obj.nLensletWavePx,nLensletSquareWavePx);
                 u         = any(val); % Index of non-zeros columns
-                wavePrgted(:,u) = fft(val(:,u),nOutWavePx);
+                wavePrgted(:,u) = obj.fourier(val(:,u),nOutWavePx);
                 v = [];
                 if nOutWavePx>nLensletImagePx
 %                     disp('Cropping!')
@@ -534,7 +548,7 @@ classdef lensletArray < handle
                 else
                     wavePrgted = zeros(nOutWavePx,nLensletsImagePx*obj.nLenslet*nLensletArray);
                 end
-                wavePrgted(:,u)  = fft(val(:,u),nOutWavePx);
+                wavePrgted(:,u)  = obj.fourier(val(:,u),nOutWavePx);
                 wavePrgted(v,:) = [];
             end
             
@@ -676,6 +690,20 @@ classdef lensletArray < handle
     end
     
     methods (Access=private)     
+
+        function nout=outputWaveSampling(obj)
+% Shared pupil-to-Fourier sampling, including the native odd-pupil adjustment.
+            nout=obj.nLensletWavePx*obj.fftPad;evenOdd=rem(obj.nLensletWavePx,2);
+            if ~rem(nout,2)&&evenOdd,nout=nout+evenOdd;end
+            nout=max(nout,obj.nLensletWavePx);
+        end
+        function out = fourier(obj,field,n)
+            if ~isempty(obj.execution) && obj.execution.Fast
+                out=obj.execution.fourier(field,n,1);
+            else
+                out=fft(field,n);
+            end
+        end
         
         function setPhasor(obj)
         % Phasor settings for Fraunhoffer propagation in order to have the
@@ -686,12 +714,7 @@ classdef lensletArray < handle
 %                 nOutWavePx = nOutWavePx + evenOdd;
 %             end
 %             fprintf(' 0ld nOutWavePx = %d',nOutWavePx);
-            nOutWavePx    = obj.nLensletWavePx*obj.fftPad;    % Pixel length of the output wave
-            evenOdd       = rem(obj.nLensletWavePx,2);
-            if ~rem(nOutWavePx,2) && evenOdd
-                nOutWavePx = nOutWavePx + evenOdd;
-            end
-            nOutWavePx = max(nOutWavePx,obj.nLensletWavePx);
+            nOutWavePx = obj.outputWaveSampling();
 %             fprintf(' - new nOutWavePx = %d\n',nOutWavePx);
 
             if ~rem(obj.nLensletImagePx,2)

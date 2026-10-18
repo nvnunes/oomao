@@ -39,6 +39,7 @@ classdef detector < handle
         % detector tag
         tag= 'DETECTOR';
         frameBuffer = 0;
+        execution = [];
         frameCount  = 0;
         % LGS elongated spot kernel
         spotsLgsSrcKernel;
@@ -326,7 +327,10 @@ classdef detector < handle
     
     methods (Access=protected)
         
-        function readOut(obj,image)
+        function readOut(obj,image,execution)
+            if nargin<3,execution=obj.execution;end
+            useFast=~isempty(execution) && execution.Fast;
+            useFastIntegration=useFast && isa(image,'double') && isa(obj.frameBuffer,'double');
             %% READOUT Detector readout
             %
             % readOut(obj,image) adds noise to the image: photon noise if
@@ -553,30 +557,54 @@ classdef detector < handle
             if obj.frameCount<obj.p_exposureTime*obj.clockRate && obj.frameCount>obj.startDelay*obj.clockRate
                 obj.frameCount = obj.frameCount - obj.startDelay*obj.clockRate;
                 obj.startDelay = 0;
-                obj.frameBuffer = obj.frameBuffer + image;
+                if useFastIntegration
+                    obj.frameBuffer=execution.accumulate(obj.frameBuffer,image);
+                else
+                    obj.frameBuffer = obj.frameBuffer + image;
+                end
                 obj.frame = [];
             else
-                image = obj.frameBuffer + image;
+                if useFastIntegration
+                    image=execution.accumulate(obj.frameBuffer,image);
+                else
+                    image = obj.frameBuffer + image;
+                end
                 
                 if license('checkout','statistics_toolbox')
                     if obj.photonNoise
-                        image = poissrnd(image + obj.nPhotonBackground) - obj.nPhotonBackground;
+                        if useFast
+                            image=execution.poissonDraw(image + obj.nPhotonBackground)-obj.nPhotonBackground;
+                        else
+                            image = poissrnd(image + obj.nPhotonBackground) - obj.nPhotonBackground;
+                        end
                     end
                     image = obj.quantumEfficiency*image;
                     if obj.readOutNoise>0
-                        image = image + randn(size(image)).*obj.readOutNoise;
+                        if useFast
+                            image=image+execution.normalDraw(size(image)).*obj.readOutNoise;
+                        else
+                            image = image + randn(size(image)).*obj.readOutNoise;
+                        end
                     end
                 else
                     if obj.photonNoise
                         buffer    = image + obj.nPhotonBackground;
-                        image = image + randn(size(image)).*(image + obj.nPhotonBackground);
+                        if useFast
+                            image=image+execution.normalDraw(size(image)).*(image+obj.nPhotonBackground);
+                        else
+                            image = image + randn(size(image)).*(image + obj.nPhotonBackground);
+                        end
                         index     = image<0;
                         image(index) = buffer(index);
                         image = obj.quantumEfficiency*image;
                     end
                     image = obj.quantumEfficiency*image;
                     if obj.readOutNoise>0
-                        image = image + randn(size(image)).*obj.readOutNoise;
+                        if useFast
+                            image=image+execution.normalDraw(size(image)).*obj.readOutNoise;
+                        else
+                            image = image + randn(size(image)).*obj.readOutNoise;
+                        end
                     end
                 end
                 if any(obj.darkBackground > 0)

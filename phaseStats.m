@@ -654,6 +654,9 @@ classdef phaseStats
             inputs.addParameter('mask',true(sampling),@islogical);
             inputs.addParameter('lag',0,@isnumeric);
             inputs.addParameter('xyOutput',[],@isnumeric);
+            inputs.addParameter('execution',[],@(x) isempty(x)||isa(x,'oomaoExecution'));
+            inputs.addParameter('rowMask',[],@(x) isempty(x)||(islogical(x)&&numel(x)==sampling^2));
+            inputs.addParameter('columnMask',[],@(x) isempty(x)||(islogical(x)&&numel(x)==sampling^2));
             inputs.parse(sampling,range,wfs,atm,srcAC,varargin{:});
             
             m_srcCC = inputs.Results.srcCC;
@@ -661,6 +664,13 @@ classdef phaseStats
             m_mask  = inputs.Results.mask;
             m_tau   = inputs.Results.lag;
             xyOutput= inputs.Results.xyOutput;
+            execution=inputs.Results.execution;
+            rowMask=inputs.Results.rowMask;columnMask=inputs.Results.columnMask;
+            if ~isempty(rowMask)||~isempty(columnMask)
+                if isempty(execution)||~execution.Fast||isempty(m_srcCC)
+                    error('oomao:CovarianceMasks','Separate masks require fast cross-covariance execution.');
+                end
+            end
                 
             %[m_x,m_y] = meshgrid( linspace(-1,1,sampling)*range/2 );
             m_nGs   = length(srcAC);
@@ -769,6 +779,13 @@ classdef phaseStats
                         %x2 = reshape(x2, sampling, sampling);
                         %y2 = reshape(y2, sampling, sampling);
                         
+                        if ~isempty(execution) && execution.Fast
+                            selectedRows=mask;selectedColumns=mask;
+                            if ~isempty(rowMask),selectedRows=rowMask;end
+                            if ~isempty(columnMask),selectedColumns=columnMask;end
+                            left=complex(zeros(nnz(selectedRows),nLayer));
+                            right=complex(zeros(nnz(selectedColumns),nLayer));
+                        end
                         for kLayer=1:nLayer
                             
                             %                         atmSlab = slab(atm,kLayer);
@@ -781,14 +798,19 @@ classdef phaseStats
                             scale = 1 - altitude(kLayer)/srcCCheight(kGs);
                             jZ  = complex( x2*scale + beta(1) , y2*scale + beta(2) );
                             
-                            out = phaseStats.covarianceMatrix(jZ, iZ, slab(atm,kLayer));
-                            out(~mask,:) = [];
-                            out(:,~mask) = [];
+                            if ~isempty(execution) && execution.Fast
+                                left(:,kLayer)=jZ(selectedRows);right(:,kLayer)=iZ(selectedColumns);
+                            else
+                                out = phaseStats.covarianceMatrix(jZ, iZ, slab(atm,kLayer));
+                                out(~mask,:) = [];
+                                out(:,~mask) = [];
+                            end
                             
-                            buf = buf + out;
+                            if isempty(execution)||~execution.Fast,buf=buf+out;end
                             
                         end
                     
+                    if ~isempty(execution)&&execution.Fast,buf=execution.layerCovariance(left,right,atm);end
                     C{k} = buf;
                     
                 end
@@ -832,6 +854,9 @@ classdef phaseStats
                         x2 = reshape(x2, sampling, sampling);
                         y2 = reshape(y2, sampling, sampling);
                         
+                        if ~isempty(execution)&&execution.Fast
+                            left=complex(zeros(nnz(mask),nLayer));right=left;
+                        end
                         for kLayer=1:nLayer
                             
                             %                         atmSlab = slab(atm,kLayer);
@@ -844,14 +869,19 @@ classdef phaseStats
                             scale = 1 - altitude(kLayer)/srcACheight(jGs);
                             jZ  = complex( x2*scale + beta(1) , y2*scale + beta(2) );
                             
-                            out = phaseStats.covarianceMatrix(iZ, jZ, slab(atm,kLayer));
-                            out(~mask,:) = [];
-                            out(:,~mask) = [];
+                            if ~isempty(execution) && execution.Fast
+                                left(:,kLayer)=iZ(mask);right(:,kLayer)=jZ(mask);
+                            else
+                                out = phaseStats.covarianceMatrix(iZ, jZ, slab(atm,kLayer));
+                                out(~mask,:) = [];
+                                out(:,~mask) = [];
+                            end
                             
-                            buf = buf + out;
+                            if isempty(execution)||~execution.Fast,buf=buf+out;end
                             
                         end
                         
+                        if ~isempty(execution)&&execution.Fast,buf=execution.layerCovariance(left,right,atm);end
                         S{k} = buf;
                         
                     end

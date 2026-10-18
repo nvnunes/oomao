@@ -41,6 +41,8 @@ classdef telescopeAbstract < handle
         samplingTime;
         % Use the precompiled double-precision interpolation kernel.
         useNativeInterpolation = false;
+        % Run-owned numerical backend; empty preserves native callers.
+        execution = [];
         leap
     end
     
@@ -94,6 +96,12 @@ classdef telescopeAbstract < handle
         phaseScreenWavelength;
         p_shape = 'disc';
         offSetInMeter;
+        fastPupilSnapshot = [];
+        fastPupilComponents = [];
+        fastPhotometricPupils = {};
+        fastPhotometricBytes = 0;
+        fastBorderPlans = {};
+        fastBorderOwner = [];
         acc;
     end
     
@@ -135,9 +143,45 @@ classdef telescopeAbstract < handle
         
         %% Get the logical pupil mask
         function pupilLogical = get.pupilLogical(obj)
-            pupilLogical = logical(abs(obj.pupil)>0);
+            if ~isempty(obj.execution)&&obj.execution.Fast
+                data=obj.pupilComponents();pupilLogical=data.mask;
+            else
+                pupilLogical=logical(abs(obj.pupil)>0);
+            end
+        end
+        function data=pupilComponents(obj)
+% Exact derived pupil arrays; snapshots detect pupil replacement/mutation.
+            pupil=obj.pupil;
+            if isempty(obj.fastPupilComponents)|| ...
+              (~obj.execution.sameArrayStorage(pupil,obj.fastPupilSnapshot)&&~isequal(pupil,obj.fastPupilSnapshot))
+                amplitude=abs(pupil);obj.fastPhotometricPupils={};obj.fastPhotometricBytes=0;
+                obj.fastPupilComponents=struct('amplitude',amplitude,'mask',logical(amplitude>0), ...
+                    'count',sum(double(logical(amplitude(:)))),'angle',angle(pupil));
+                obj.fastPupilSnapshot=pupil;
+            end
+            data=obj.fastPupilComponents;
         end
         
+        function amplitude=photometricPupil(obj,scale)
+% Reuse only exact finite scalar-photometry products of the current pupil.
+            data=obj.pupilComponents();
+            cache=isa(scale,'double')&&isreal(scale)&&isscalar(scale)&&isfinite(scale)&&scale>0;
+            if cache
+                for k=1:numel(obj.fastPhotometricPupils)
+                    entry=obj.fastPhotometricPupils{k};
+                    if entry.scale==scale,amplitude=entry.value;return;end
+                end
+            end
+            amplitude=data.amplitude.*scale;bytes=numel(amplitude)*8;
+            if cache&&bytes<=64*1024^2
+                while ~isempty(obj.fastPhotometricPupils)&&(numel(obj.fastPhotometricPupils)>=8||obj.fastPhotometricBytes+bytes>64*1024^2)
+                    old=obj.fastPhotometricPupils{1};obj.fastPhotometricBytes=obj.fastPhotometricBytes-numel(old.value)*8;obj.fastPhotometricPupils(1)=[];
+                end
+                obj.fastPhotometricPupils{end+1}=struct('scale',scale,'value',amplitude);
+                obj.fastPhotometricBytes=obj.fastPhotometricBytes+bytes;
+            end
+        end
+
         %% Get telescope radius
         function out = get.R(obj)
             out = obj.D/2;
@@ -396,7 +440,12 @@ classdef telescopeAbstract < handle
                             %obj.atm.layer(kLayer).phase ...
                             %    = spline2({u0,u0},obj.mapShift{kLayer},{yShift,xShift});
                             %obj.atm.layer(kLayer).phase = linear(x0,y0,obj.mapShift{kLayer},xi,yi); %%
-                            obj.atm.layer(kLayer).phase = interp2(x0,y0,obj.mapShift{kLayer},xi,yi,'cubic');
+                            fractionalStep = stepInMeter/pixelLength;
+                            if ~isempty(obj.execution)&&obj.execution.Fast&&all(abs(fractionalStep)<1)
+                                obj.atm.layer(kLayer).phase = obj.execution.shiftScreen(obj.mapShift{kLayer},fractionalStep);
+                            else
+                                obj.atm.layer(kLayer).phase = interp2(x0,y0,obj.mapShift{kLayer},xi,yi,'cubic');
+                            end
                             
                             % [FX,FY] = gradient(obj.mapShift{kLayer},pixelLength);
                             % buf = obj.mapShift{kLayer} - step(1)*FX - step(2)*FY;
@@ -427,7 +476,18 @@ classdef telescopeAbstract < handle
                                 end
                                 % 1 pixel around phase increase~
                                 %Z = obj.atm.layer(kLayer).phase(obj.innerMask{kLayer}(2:end-1,2:end-1));
-                                X = obj.A{kLayer}*Z + obj.B{kLayer}*randn(obj.atm.rngStream,size(obj.B{kLayer},2),1);
+                                if ~isempty(obj.execution)&&obj.execution.Fast
+                                    if ~isequal(obj.fastBorderOwner,obj.execution)
+                                        obj.fastBorderPlans=cell(1,obj.atm.nLayer);obj.fastBorderOwner=obj.execution;
+                                    end
+                                    if isempty(obj.fastBorderPlans{kLayer})
+                                        obj.fastBorderPlans{kLayer}=obj.execution.prepareScreenBorder(obj.A{kLayer},obj.B{kLayer});
+                                    end
+                                    noise=obj.execution.normalDraw(obj.atm.rngStream,size(obj.B{kLayer},2),1);
+                                    X=obj.execution.extendScreen(obj.A{kLayer},Z,obj.B{kLayer},noise,obj.fastBorderPlans{kLayer});
+                                else
+                                    X = obj.A{kLayer}*Z + obj.B{kLayer}*randn(obj.atm.rngStream,size(obj.B{kLayer},2),1);
+                                end
                                 obj.mapShift{kLayer}(obj.outerMask{kLayer})  = X;
                                 %obj.mapShift{kLayer}(~obj.outerMask{kLayer}) = obj.atm.layer(kLayer).phase(:);
                                 obj.mapShift{kLayer}(~obj.outerMask{kLayer}) = onePixelShiftedPhaseScreen(:);
@@ -650,21 +710,51 @@ classdef telescopeAbstract < handle
                     obj.resolution = length(srcs(1).amplitude);
                 end
             end
+            fastPupil=~isempty(obj.execution)&&obj.execution.Fast;
+            if fastPupil,data=obj.pupilComponents();end
+            fastRelay=fastPupil&&strcmp(class(srcs),'source');
+            if fastRelay
+                elevationScale=sqrt(cos(obj.elevation));
+                previousWavelength=[];
+                % These inputs are shared within this relay invocation only.
+                if ~isempty(obj.atm)
+                    atm_m=obj.atm;
+                    nLayer=atm_m.nLayer;
+                    layers=atm_m.layer;
+                    altitude_m=[layers.altitude];
+                    sampler_m=obj.sampler;
+                    phase_m={layers.phase};
+                    R_=obj.R;
+                    layerSampling_m={layers.sampling};
+                    layersNPixel=[layers.nPixel];
+                    m_origin=obj.origin;
+                end
+            end
             nSrc = numel(srcs);
             for kSrc=1:nSrc % Browse the srcs array
                 src = srcs(kSrc);
                 % Set mask and pupil first
-                src.mask      = obj.pupilLogical;
-                if isempty(src.nPhoton) || (isempty(obj.samplingTime) || isinf(obj.samplingTime))
-                    src.amplitude = abs(obj.pupil);
+                if fastPupil
+                    src.mask=data.mask;
+                    if isempty(src.nPhoton)||(isempty(obj.samplingTime)||isinf(obj.samplingTime))
+                        src.amplitude=data.amplitude;
+                    else
+                        src.amplitude=obj.photometricPupil(sqrt(obj.samplingTime*src.nPhoton.*obj.area/data.count));
+                    end
                 else
-                    src.amplitude = abs(obj.pupil).*sqrt(obj.samplingTime*src.nPhoton.*obj.area/sum(double(logical(abs(obj.pupil(:))))));
+                    src.mask=obj.pupilLogical;
+                    if isempty(src.nPhoton)||(isempty(obj.samplingTime)||isinf(obj.samplingTime))
+                        src.amplitude=abs(obj.pupil);
+                    else
+                        src.amplitude=abs(obj.pupil).*sqrt(obj.samplingTime*src.nPhoton.*obj.area/sum(double(logical(abs(obj.pupil(:))))));
+                    end
                 end
                 out = 0;
                 if ~isempty(obj.atm) % Set phase if an atmosphere is defined
                     if obj.fieldOfView==0 && isNgs(src) && obj.atm.layer(1).nPixel==obj.resolution
                         out = out + sum(cat(3,obj.atm.layer.phase),3);
                     else
+                        if ~fastRelay
                         atm_m           = obj.atm;
                         nLayer          = atm_m.nLayer;
                         layers          = atm_m.layer;
@@ -674,11 +764,16 @@ classdef telescopeAbstract < handle
                         R_              = obj.R;
                         layerSampling_m = { layers.sampling };
                         layersNPixel    = [ layers.nPixel ] ;
+                        end
                         srcDirectionVector1 = src.directionVector(1);
                         srcDirectionVector2 = src.directionVector(2);
                         srcHeight = src.height;
-                        m_origin = obj.origin;
-                        if obj.useNativeInterpolation
+                        if ~fastRelay,m_origin = obj.origin;end
+                        if ~isempty(obj.execution) && obj.execution.Fast
+                            out = obj.execution.projectAtmosphere(phase_m,layerSampling_m,altitude_m, ...
+                                size(src.amplitude,1),sampler_m,R_, ...
+                                [srcDirectionVector1,srcDirectionVector2],m_origin,srcHeight);
+                        elseif obj.useNativeInterpolation
                             out = oomao_atmosphere_mex(phase_m,layerSampling_m,altitude_m, ...
                                 size(src.amplitude,1),sampler_m,R_, ...
                                 [srcDirectionVector1,srcDirectionVector2],m_origin,srcHeight);
@@ -750,7 +845,18 @@ classdef telescopeAbstract < handle
                     %                     out = (obj.atm.wavelength/src.wavelength)*out; % Scale the phase according to the src wavelength
                     out = (obj.phaseScreenWavelength/src.wavelength)*out; % Scale the phase according to the src wavelength
                 end
-                src.phase = fresnelPropagation(src,obj) + out/sqrt( cos( obj.elevation ) )+angle(obj.pupil)*2*pi/src.wavelength;
+                if fastRelay
+                    wavelength=src.wavelength;
+                    if ~isequal(wavelength,previousWavelength)
+                        pupilPhase=data.angle*2*pi/wavelength;
+                        previousWavelength=wavelength;
+                    end
+                    src.phase=fresnelPropagation(src,obj)+out/elevationScale+pupilPhase;
+                elseif fastPupil
+                    src.phase=fresnelPropagation(src,obj)+out/sqrt(cos(obj.elevation))+data.angle*2*pi/src.wavelength;
+                else
+                    src.phase=fresnelPropagation(src,obj)+out/sqrt(cos(obj.elevation))+angle(obj.pupil)*2*pi/src.wavelength;
+                end
                 
                 % line commented out to comply with electic field amplitude at the WFS focal plane 12/12/2016, ccorreia
                 %if isfinite(src.height);src.amplitude = 1./src.height;end
@@ -1054,6 +1160,7 @@ classdef telescopeAbstract < handle
         function wavelengthScale(obj,varargin)
             %% WAVELENGTHSCALE
             
+            obj.fastBorderPlans={};obj.fastBorderOwner=[];
             if ~isempty(obj.mapShift)
                 add(obj.log,obj,'Scaling wavefront!')
                 nLayer = obj.atm.nLayer;
@@ -1086,6 +1193,7 @@ classdef telescopeAbstract < handle
     methods (Access=protected)
         
         function obj = init(obj)
+            obj.fastBorderPlans={};obj.fastBorderOwner=[];
             %% INIT
             
             if ~isempty(obj.resolution)
@@ -1128,25 +1236,32 @@ classdef telescopeAbstract < handle
                             fprintf('            -> Computing matrix A and B for layer %d: ',kLayer)
                             [u,v] = meshgrid( (0:nPixel+1).*D_m/(nPixel-1) );
                             % ---------
-                            innerZ = complex(u(obj.innerMask{kLayer}),v(obj.innerMask{kLayer}));
-                            fprintf('ZZt ...')
-                            ZZt = phaseStats.covarianceMatrix(innerZ,m_atm);
-                            % ---------
-                            outerZ = complex(u(obj.outerMask{kLayer}),v(obj.outerMask{kLayer}));
-                            fprintf('\b\b\b, ZXt ...')
-                            ZXt = phaseStats.covarianceMatrix(innerZ,outerZ,m_atm);
-                            clear innerZ
-                            % ---------
-                            obj.A{kLayer}   = ZXt'/ZZt;
-                            % ---------
-                            clear ZZt
-                            fprintf('\b\b\b, XXt ...')
-                            XXt = phaseStats.covarianceMatrix(outerZ,m_atm);
-                            clear outerZ
-                            % ---------
-                            BBt = XXt - obj.A{kLayer}*ZXt;
-                            clear XXt ZXt
-                            obj.B{kLayer} = chol(BBt,'lower');
+                            if ~isempty(obj.execution)&&obj.execution.hasAtmosphereCache()
+                                innerZ=complex(u(obj.innerMask{kLayer}),v(obj.innerMask{kLayer}));
+                                outerZ=complex(u(obj.outerMask{kLayer}),v(obj.outerMask{kLayer}));
+                                [obj.A{kLayer},obj.B{kLayer}]=obj.execution.atmosphereMatrices(innerZ,outerZ,m_atm,kLayer);
+                                clear innerZ outerZ
+                            else
+                                innerZ = complex(u(obj.innerMask{kLayer}),v(obj.innerMask{kLayer}));
+                                fprintf('ZZt ...')
+                                ZZt = phaseStats.covarianceMatrix(innerZ,m_atm);
+                                % ---------
+                                outerZ = complex(u(obj.outerMask{kLayer}),v(obj.outerMask{kLayer}));
+                                fprintf('\b\b\b, ZXt ...')
+                                ZXt = phaseStats.covarianceMatrix(innerZ,outerZ,m_atm);
+                                clear innerZ
+                                % ---------
+                                obj.A{kLayer}   = ZXt'/ZZt;
+                                % ---------
+                                clear ZZt
+                                fprintf('\b\b\b, XXt ...')
+                                XXt = phaseStats.covarianceMatrix(outerZ,m_atm);
+                                clear outerZ
+                                % ---------
+                                BBt = XXt - obj.A{kLayer}*ZXt;
+                                clear XXt ZXt
+                                obj.B{kLayer} = chol(BBt,'lower');
+                            end
                             fprintf('  Done \n')
                             % ---------
                             obj.windVx(kLayer) = m_atm.layer.windSpeed.*cos(m_atm.layer.windDirection);

@@ -23,6 +23,7 @@ classdef deformableMirror < handle
     % See also influenceFunction
     
     properties
+        execution = [];
         % conjugation altitude
         zLocation = 0;
         % # of actuator
@@ -75,6 +76,11 @@ classdef deformableMirror < handle
     end
     
     properties (Access=private)
+        cpuModesSnapshot = [];
+        cpuModesTranspose = [];
+        cpuCoefficientSnapshot = [];
+        cpuSurfaceValid = false;
+        cpuSurfaceExecution = [];
         p_coefs;
         p_coefsRef;
         p_surface;
@@ -235,7 +241,29 @@ classdef deformableMirror < handle
         end
         %% Get the dm shape
         function dmShape = get.surface(obj)
-            obj.p_surface = obj.modes*obj.coefs;
+            matrix=[];coefficients=[];
+            if ~isempty(obj.execution) && obj.execution.Fast
+                if isnumeric(obj.modes),matrix=obj.modes;
+                elseif isprop(obj.modes,'modes'),matrix=obj.modes.modes;end
+                coefficients=obj.coefs;
+            end
+            if ~isempty(matrix) && issparse(matrix) && isa(matrix,'double') && isreal(matrix) ...
+                    && isa(coefficients,'double') && isreal(coefficients) && ~issparse(coefficients)
+                if ~obj.execution.sameArrayStorage(matrix,obj.cpuModesSnapshot)&&~isequal(matrix,obj.cpuModesSnapshot)
+                    obj.cpuModesSnapshot=matrix;
+                    obj.cpuModesTranspose=matrix.';
+                    obj.cpuSurfaceValid=false;
+                end
+                sameOwner=~isempty(obj.cpuSurfaceExecution)&&obj.cpuSurfaceExecution==obj.execution;
+                if ~obj.cpuSurfaceValid||~sameOwner||~isequal(coefficients,obj.cpuCoefficientSnapshot)
+                    obj.p_surface=obj.execution.sparseSurface(obj.cpuModesTranspose,coefficients);
+                    obj.cpuCoefficientSnapshot=coefficients;
+                    obj.cpuSurfaceExecution=obj.execution;obj.cpuSurfaceValid=true;
+                end
+            else
+                obj.cpuSurfaceValid=false;
+                obj.p_surface = obj.modes*obj.coefs;
+            end
             if obj.lex
                 dmShape = obj.p_surface;
             else
@@ -251,8 +279,20 @@ classdef deformableMirror < handle
             
             nSrc       = numel(srcs);
             wavenumber = 2*pi/srcs(1).wavelength;
-            dmPhase    = -2*obj.surface*wavenumber;
+            dmSurface  = obj.surface;
             nPhase     = size(obj.p_coefs,2);
+            % Scale one direction at a time, avoiding a full phase-cube temporary.
+            if ~isempty(obj.execution)&&obj.execution.Fast&&obj.zLocation==0&& ...
+                    ~obj.lex&&nPhase>1&&nPhase<=nSrc&&size(dmSurface,3)==nPhase&& ...
+                    isa(dmSurface,'double')&&isreal(dmSurface)&&~issparse(dmSurface)
+                for kSrc = 1:nSrc
+                    src = srcs(kSrc);
+                    src.phase = -2*dmSurface(:,:,min(kSrc,nPhase))*wavenumber;
+                    src.amplitude = 1;
+                end
+                return
+            end
+            dmPhase    = -2*dmSurface*wavenumber;
             if obj.zLocation == 0
                 if nPhase>nSrc
                     for kSrc = 1:nSrc

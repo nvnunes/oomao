@@ -1,5 +1,6 @@
 classdef geomGrad < handle
     properties (SetAccess = public)
+        execution=[];
         validLenslet;
         resolution;
         pupil;
@@ -29,6 +30,11 @@ classdef geomGrad < handle
         % vector of offsets
         p_offset = [0;0;0];
         p_rotation = 0;
+        fastGradient=[];
+        fastTranspose=[];
+        fastPupil=[];
+        fastPixels=[];
+        fastAxis=[];
     end
     
     methods
@@ -114,6 +120,24 @@ classdef geomGrad < handle
             %             end
             pupil0 = double(src(1).mask);
             for iSrc = 1:nSrc
+                if ~isempty(obj.execution)&&obj.execution.Fast&&ndimsPhase==2&&all(obj.rotation(:)==0)
+                    if isempty(obj.fastGradient)||~isequal(obj.fastGradient,obj.gradOp)||~isequal(obj.fastPupil,obj.pupil)
+                        obj.fastGradient=obj.gradOp;obj.fastTranspose=obj.gradOp.';
+                        obj.fastPupil=obj.pupil;obj.fastPixels=double(find(obj.pupil));
+                        obj.fastAxis=linspace(-.5,.5,nx);
+                    end
+                    delta=[0;0];phase=src(iSrc).phase;
+                    if iSrc<=size(obj.offset,2)&&any(obj.offset(:)~=0)
+                        delta=obj.offset(:,iSrc);phase=src(iSrc).phaseUnmasked;
+                    end
+                    value=obj.execution.geometricSlopes(obj.fastTranspose,phase,obj.fastPixels,delta,obj.fastAxis);
+                    if iSrc<=size(obj.offset,2)&&any(obj.offset(:)~=0)
+                        obj.slopes(:,:,iSrc)=value;
+                    else
+                        obj.slopes(:,iSrc)=value;
+                    end
+                    continue
+                end
                 % apply any offsets
                 if (~isempty(obj.offset) && any(obj.offset(:) ~= 0) || ~isempty(obj.rotation) && any(obj.rotation(:) ~= 0) ) && iSrc <= size(obj.offset,2)
                     R = 0.5;
