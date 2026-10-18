@@ -43,6 +43,8 @@ classdef telescopeAbstract < handle
         useNativeInterpolation = false;
         % Run-owned numerical backend; empty preserves native callers.
         execution = [];
+        % Opt in before attaching an atmosphere; legacy transport is default.
+        useCorrectedWindTransport = false;
         leap
     end
     
@@ -102,6 +104,8 @@ classdef telescopeAbstract < handle
         fastPhotometricBytes = 0;
         fastBorderPlans = {};
         fastBorderOwner = [];
+        windTransportRemainder = {};
+        windTransportDisplacement = {};
         acc;
     end
     
@@ -141,6 +145,15 @@ classdef telescopeAbstract < handle
             obj.opticalAberration = p.Results.opticalAberration;
         end
         
+        function set.useCorrectedWindTransport(obj,value)
+            validateattributes(value,{'logical'},{'scalar'});
+            if ~isempty(obj.atm) && value ~= obj.useCorrectedWindTransport
+                error('oomao:WindTransportAttached', ...
+                    'Select wind transport before attaching an atmosphere.');
+            end
+            obj.useCorrectedWindTransport = value;
+        end
+
         %% Get the logical pupil mask
         function pupilLogical = get.pupilLogical(obj)
             if ~isempty(obj.execution)&&obj.execution.Fast
@@ -236,6 +249,10 @@ classdef telescopeAbstract < handle
                 obj.atm.layer(kLayer).phase = fourierPhaseScreen(m_atm,m_atm.layer.D,m_atm.layer.nPixel);
                 obj.offSetInMeter{kLayer} = [0 0];
                 obj.count{kLayer} = [0 0];
+                if obj.useCorrectedWindTransport
+                    obj.windTransportRemainder{kLayer} = [0 0];
+                    obj.windTransportDisplacement{kLayer} = [0 0];
+                end
                 
                 Z = obj.atm.layer(kLayer).phase(obj.innerMask{kLayer}(2:end-1,2:end-1));
                 X = obj.A{kLayer}*Z + obj.B{kLayer}*randn(obj.atm.rngStream,size(obj.B{kLayer},2),1);
@@ -258,6 +275,10 @@ classdef telescopeAbstract < handle
                 if nargin>1 && resetStepping
                     obj.count{kLayer} = [0 0];
                     obj.offSetInMeter{kLayer} = [0 0];
+                    if obj.useCorrectedWindTransport
+                        obj.windTransportRemainder{kLayer} = [0 0];
+                        obj.windTransportDisplacement{kLayer} = [0 0];
+                    end
                 end
                 m_atm = slab(obj.atm,kLayer);
                 %                 fprintf('   Layer %d:\n',kLayer)
@@ -400,6 +421,8 @@ classdef telescopeAbstract < handle
                     end
                     %                    choleskyPhaseScreen(obj.atm);
                     
+                elseif obj.useCorrectedWindTransport
+                    updateCorrectedWindTransport(obj);
                 elseif ~(obj.atm.nLayer==1 && (obj.atm.layer.windSpeed==0 || isempty(obj.atm.layer.windSpeed) ) )
                     %                 disp('HERE')
                     for kLayer=1:obj.atm.nLayer
@@ -1192,6 +1215,48 @@ classdef telescopeAbstract < handle
     
     methods (Access=protected)
         
+        function updateCorrectedWindTransport(obj)
+            % Keep integer transport on the persistent grid; interpolate only
+            % the displayed phase at the unconsumed fractional displacement.
+            validateattributes(obj.samplingTime,{'double'},{'scalar','finite','positive'});
+            for kLayer = 1:obj.atm.nLayer
+                n = obj.atm.layer(kLayer).nPixel;
+                pitch = obj.atm.layer(kLayer).D/(n-1);
+                delta = [obj.windVx(kLayer) obj.windVy(kLayer)]*obj.samplingTime;
+                if all(delta == 0)
+                    continue
+                end
+                residual = obj.windTransportRemainder{kLayer} + delta/pitch;
+                % Snap only floating-point roundoff at integer crossings.
+                nearest = round(residual);
+                atInteger = abs(residual-nearest) <= 8*eps(max(1,abs(residual)));
+                residual(atInteger) = nearest(atInteger);
+                whole = fix(residual);
+                obj.windTransportRemainder{kLayer} = residual-whole;
+                obj.windTransportDisplacement{kLayer} = ...
+                    obj.windTransportDisplacement{kLayer} + delta/pitch;
+                while any(whole ~= 0)
+                    step = sign(whole);
+                    screen = obj.mapShift{kLayer}((2:n+1)-step(2),(2:n+1)-step(1));
+                    Z = screen(obj.innerMask{kLayer}(2:end-1,2:end-1));
+                    X = obj.A{kLayer}*Z + obj.B{kLayer}* ...
+                        randn(obj.atm.rngStream,size(obj.B{kLayer},2),1);
+                    obj.mapShift{kLayer}(obj.outerMask{kLayer}) = X;
+                    obj.mapShift{kLayer}(~obj.outerMask{kLayer}) = screen(:);
+                    whole = whole-step;
+                end
+                residual = obj.windTransportRemainder{kLayer};
+                if all(residual == 0)
+                    obj.atm.layer(kLayer).phase = obj.mapShift{kLayer}(2:n+1,2:n+1);
+                else
+                    [xi,yi] = meshgrid((0:n-1)-residual(1),(0:n-1)-residual(2));
+                    obj.atm.layer(kLayer).phase = ...
+                        interp2(-1:n,(-1:n)',obj.mapShift{kLayer},xi,yi,'cubic');
+                end
+                obj.leap = obj.windTransportDisplacement{kLayer};
+            end
+        end
+
         function obj = init(obj)
             obj.fastBorderPlans={};obj.fastBorderOwner=[];
             %% INIT
@@ -1273,6 +1338,10 @@ classdef telescopeAbstract < handle
                             %obj.nShift{kLayer} = floor(1./abs(pixelStep));
                             obj.acc{kLayer} = zeros(1,2);
                             obj.offSetInMeter{kLayer} = zeros(1,2);
+                            if obj.useCorrectedWindTransport
+                                obj.windTransportRemainder{kLayer} = zeros(1,2);
+                                obj.windTransportDisplacement{kLayer} = zeros(1,2);
+                            end
                             u = (0:nPixel+1).*D_m./(nPixel-1);
                             %                 [u,v] = meshgrid(u);
                             obj.x{kLayer} = u;
