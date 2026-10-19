@@ -45,6 +45,8 @@ classdef telescopeAbstract < handle
         execution = [];
         % Opt in before attaching an atmosphere; legacy transport is default.
         useCorrectedWindTransport = false;
+        % Optional native phase-bank border observer/replay.
+        screenBorder = [];
         leap
     end
     
@@ -464,6 +466,9 @@ classdef telescopeAbstract < handle
                             %    = spline2({u0,u0},obj.mapShift{kLayer},{yShift,xShift});
                             %obj.atm.layer(kLayer).phase = linear(x0,y0,obj.mapShift{kLayer},xi,yi); %%
                             fractionalStep = stepInMeter/pixelLength;
+                            if ~isempty(obj.screenBorder) && ~obj.screenBorder.Replay && ismethod(obj.screenBorder,'fraction')
+                                obj.screenBorder.fraction(kLayer,stepInMeter,fractionalStep);
+                            end
                             if ~isempty(obj.execution)&&obj.execution.Fast&&all(abs(fractionalStep)<1)
                                 obj.atm.layer(kLayer).phase = obj.execution.shiftScreen(obj.mapShift{kLayer},fractionalStep);
                             else
@@ -499,7 +504,10 @@ classdef telescopeAbstract < handle
                                 end
                                 % 1 pixel around phase increase~
                                 %Z = obj.atm.layer(kLayer).phase(obj.innerMask{kLayer}(2:end-1,2:end-1));
-                                if ~isempty(obj.execution)&&obj.execution.Fast
+                                if ~isempty(obj.screenBorder) && obj.screenBorder.Replay
+                                    randn(obj.atm.rngStream,size(obj.B{kLayer},2),1);
+                                    X=obj.screenBorder.next(kLayer);
+                                elseif ~isempty(obj.execution)&&obj.execution.Fast
                                     if ~isequal(obj.fastBorderOwner,obj.execution)
                                         obj.fastBorderPlans=cell(1,obj.atm.nLayer);obj.fastBorderOwner=obj.execution;
                                     end
@@ -511,9 +519,15 @@ classdef telescopeAbstract < handle
                                 else
                                     X = obj.A{kLayer}*Z + obj.B{kLayer}*randn(obj.atm.rngStream,size(obj.B{kLayer},2),1);
                                 end
+                                if ~isempty(obj.screenBorder) && ~obj.screenBorder.Replay
+                                    obj.screenBorder.record(kLayer,X);
+                                end
                                 obj.mapShift{kLayer}(obj.outerMask{kLayer})  = X;
                                 %obj.mapShift{kLayer}(~obj.outerMask{kLayer}) = obj.atm.layer(kLayer).phase(:);
                                 obj.mapShift{kLayer}(~obj.outerMask{kLayer}) = onePixelShiftedPhaseScreen(:);
+                                if ~isempty(obj.screenBorder) && ~obj.screenBorder.Replay && ismethod(obj.screenBorder,'renewed')
+                                    obj.screenBorder.renewed(kLayer,obj.mapShift{kLayer},stepInPixel);
+                                end
                                 %obj.count{kLayer} = obj.count{kLayer} + 1;
                                 %obj.count{kLayer}(obj.count{kLayer} >=(obj.nShift{kLayer}-1)) = 0;
                                 
@@ -1243,9 +1257,18 @@ classdef telescopeAbstract < handle
                         randn(obj.atm.rngStream,size(obj.B{kLayer},2),1);
                     obj.mapShift{kLayer}(obj.outerMask{kLayer}) = X;
                     obj.mapShift{kLayer}(~obj.outerMask{kLayer}) = screen(:);
+                    if ~isempty(obj.screenBorder) && ~obj.screenBorder.Replay
+                        obj.screenBorder.record(kLayer,X);
+                        if ismethod(obj.screenBorder,'renewed')
+                            obj.screenBorder.renewed(kLayer,obj.mapShift{kLayer},step);
+                        end
+                    end
                     whole = whole-step;
                 end
                 residual = obj.windTransportRemainder{kLayer};
+                if ~isempty(obj.screenBorder) && ~obj.screenBorder.Replay && ismethod(obj.screenBorder,'fraction')
+                    obj.screenBorder.fraction(kLayer,residual*pitch,residual);
+                end
                 if all(residual == 0)
                     obj.atm.layer(kLayer).phase = obj.mapShift{kLayer}(2:n+1,2:n+1);
                 else
