@@ -16,6 +16,7 @@ classdef oomaoExecution < handle
         AtmospherePrefix = ''
         AtmosphereEvents = {}
         FittingDirectory = ''
+        FittingInputs = struct()
         FittingEvents = {}
         GroundEntries = {}
         GroundBytes = 0
@@ -179,22 +180,23 @@ classdef oomaoExecution < handle
         function enabled=hasAtmosphereCache(obj)
             enabled=obj.Fast&&~isempty(obj.AtmosphereDirectory);
         end
-        function [A,B]=atmosphereMatrices(obj,inner,outer,atm,layer)
+        function [A,B]=atmosphereMatrices(obj,inner,outer,atm,layer,geometry)
             if ~obj.hasAtmosphereCache(),error('oomao:AtmosphereCacheNotConfigured','Configure atmosphere cache storage first.');end
             name=sprintf('%s_layer_%02d',obj.AtmospherePrefix,layer);
-            [A,B,event]=oomaoFastAtmosphereMatrices(inner,outer,atm,obj.AtmosphereDirectory,obj.Threads,name);
+            [A,B,event]=oomaoFastAtmosphereMatrices(inner,outer,atm,obj.AtmosphereDirectory,obj.Threads,name,geometry);
             obj.AtmosphereEvents{end+1}=event;
         end
         function events=atmosphereCacheStats(obj)
             events=obj.AtmosphereEvents;
         end
-        function configureFittingCache(obj,directory,release)
+        function configureFittingCache(obj,directory,release,inputs)
 % Optional persistent storage is separate from every existing HO cache.
             if ~obj.Fast,return;end
             if ~(ischar(directory)&&isrow(directory)&&~isempty(directory))
                 error('oomao:FittingCacheDirectory','A nonempty cache directory is required.');
             end
             obj.FittingDirectory=oomaoFastCacheDirectory(directory,release);
+            obj.FittingInputs=inputs;
         end
         function out = fittingInverse(obj,name,matrix,varargin)
 % This is still native pinv, with its exact default or explicit tolerance.
@@ -204,7 +206,10 @@ classdef oomaoExecution < handle
             if isempty(regexp(name,'^[a-zA-Z0-9_-]+$','once'))
                 error('oomao:FittingCacheName','A readable fitting-matrix role is required.');
             end
-            [out,event]=oomaoFastFittingInverse(matrix,varargin,obj.FittingDirectory,obj.Threads,name);
+            if ~isfield(obj.FittingInputs,name)
+                error('oomao:FittingCacheMetadata','Missing scientific inputs for %s.',name);
+            end
+            [out,event]=oomaoFastFittingInverse(matrix,varargin,obj.FittingDirectory,obj.Threads,name,obj.FittingInputs.(name));
             obj.FittingEvents{end+1}=event;
         end
         function events = fittingCacheStats(obj)
