@@ -6,6 +6,9 @@ if isfile(file)
  t=tic;value=validator(readRecord(file,errorId));event.hit=true;
  event.ioSeconds=toc(t);event.totalSeconds=toc(clock);return
 end
+if ~isempty(getenv('OOMAO_BENCHMARK_FILE')) && ~strcmp(getenv('OOMAO_BENCHMARK_PREPARE'),'true')
+ error('oomao:BenchmarkPreparation','Required matrix was not prepared: %s.',file);
+end
 directory=fileparts(file);
 if ~isfolder(directory)
  [ok,message]=mkdir(directory);if ~ok,error('oomao:CacheDirectory','%s',message);end
