@@ -1327,7 +1327,8 @@ classdef telescopeAbstract < handle
                             if ~isempty(obj.execution)&&obj.execution.hasAtmosphereCache()
                                 innerZ=complex(u(obj.innerMask{kLayer}),v(obj.innerMask{kLayer}));
                                 outerZ=complex(u(obj.outerMask{kLayer}),v(obj.outerMask{kLayer}));
-                                [obj.A{kLayer},obj.B{kLayer}]=obj.execution.atmosphereMatrices(innerZ,outerZ,m_atm,kLayer);
+                                [obj.A{kLayer},obj.B{kLayer}]=obj.execution.atmosphereMatrices(innerZ,outerZ,m_atm,kLayer, ...
+                                    struct('diameter',D_m,'nPixel',nPixel,'innerWidth',nInner));
                                 clear innerZ outerZ
                             else
                                 innerZ = complex(u(obj.innerMask{kLayer}),v(obj.innerMask{kLayer}));

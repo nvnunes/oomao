@@ -81,6 +81,7 @@ classdef deformableMirror < handle
         cpuCoefficientSnapshot = [];
         cpuSurfaceValid = false;
         cpuSurfaceExecution = [];
+        fastSurfacePlan = [];
         p_coefs;
         p_coefsRef;
         p_surface;
@@ -253,10 +254,16 @@ classdef deformableMirror < handle
                     obj.cpuModesSnapshot=matrix;
                     obj.cpuModesTranspose=matrix.';
                     obj.cpuSurfaceValid=false;
+                    if ~isempty(obj.fastSurfacePlan),delete(obj.fastSurfacePlan);obj.fastSurfacePlan=[];end;
                 end
                 sameOwner=~isempty(obj.cpuSurfaceExecution)&&obj.cpuSurfaceExecution==obj.execution;
+                if ~sameOwner || (strcmp(obj.execution.Backend,'cuda')&&~obj.execution.isCurrentSparseSurface(obj.fastSurfacePlan))
+                    if ~isempty(obj.fastSurfacePlan),delete(obj.fastSurfacePlan);end
+                    obj.fastSurfacePlan=obj.execution.prepareSparseSurface(obj.cpuModesTranspose);
+                    obj.cpuSurfaceValid=false;
+                end
                 if ~obj.cpuSurfaceValid||~sameOwner||~isequal(coefficients,obj.cpuCoefficientSnapshot)
-                    obj.p_surface=obj.execution.sparseSurface(obj.cpuModesTranspose,coefficients);
+                    obj.p_surface=obj.execution.sparseSurface(obj.cpuModesTranspose,coefficients,obj.fastSurfacePlan);
                     obj.cpuCoefficientSnapshot=coefficients;
                     obj.cpuSurfaceExecution=obj.execution;obj.cpuSurfaceValid=true;
                 end

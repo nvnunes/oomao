@@ -109,17 +109,37 @@ static void csrProduct(mxArray*& out,const mxArray* transpose,const mxArray* coe
     out=mxCreateDoubleMatrix(pixels,rhs,mxREAL);double* output=mxGetDoubles(out);
     if(rhs==0)return;
     oomaoPool().run(pixels,threads,[&](size_t begin,size_t end){
-        for(size_t pixel=begin;pixel<end;++pixel)for(size_t source=0;source<rhs;++source) {
-            double value=0;
-            for(size_t k=columns[pixel];k<columns[pixel+1];++k)value+=values[k]*b[modes[k]+source*n];
-            output[pixel+pixels*source]=value;
+        for(size_t pixel=begin;pixel<end;++pixel) {
+            size_t source=0;
+            // Reuse each influence value across eight independent ordered sums.
+            for(;source+8<=rhs;source+=8) {
+                double accum[8]={};
+                for(size_t k=columns[pixel];k<columns[pixel+1];++k) {
+                    const double a=values[k];const size_t row=modes[k];
+                    #if defined(__clang__)
+                    #pragma clang loop unroll(full)
+                    #endif
+                    for(size_t j=0;j<8;++j)accum[j]+=a*b[row+(source+j)*n];
+                }
+                for(size_t j=0;j<8;++j)output[pixel+pixels*(source+j)]=accum[j];
+            }
+            for(;source<rhs;++source) {
+                double value=0;
+                for(size_t k=columns[pixel];k<columns[pixel+1];++k)value+=values[k]*b[modes[k]+source*n];
+                output[pixel+pixels*source]=value;
+            }
         }
     });
 }
 
 static bool sameStorage(const mxArray* a,const mxArray* b){
+ if(!a||!b)return a==b;
  if(mxGetClassID(a)!=mxGetClassID(b)||mxIsSparse(a)!=mxIsSparse(b)||mxIsComplex(a)!=mxIsComplex(b)||mxGetNumberOfDimensions(a)!=mxGetNumberOfDimensions(b))return false;
  for(size_t k=0;k<mxGetNumberOfDimensions(a);++k)if(mxGetDimensions(a)[k]!=mxGetDimensions(b)[k])return false;
+ if(mxIsCell(a)){
+  for(size_t k=0;k<mxGetNumberOfElements(a);++k)if(!sameStorage(mxGetCell(a,k),mxGetCell(b,k)))return false;
+  return true;
+ }
  if(mxIsComplex(a)||(!mxIsNumeric(a)&&!mxIsLogical(a)))return false;
  return mxGetData(a)==mxGetData(b)&&(!mxIsSparse(a)||(mxGetIr(a)==mxGetIr(b)&&mxGetJc(a)==mxGetJc(b)));
 }

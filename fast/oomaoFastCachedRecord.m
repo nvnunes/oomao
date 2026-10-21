@@ -6,6 +6,10 @@ if isfile(file)
  t=tic;value=validator(readRecord(file,errorId));event.hit=true;
  event.ioSeconds=toc(t);event.totalSeconds=toc(clock);return
 end
+directory=fileparts(file);
+if ~isfolder(directory)
+ [ok,message]=mkdir(directory);if ~ok,error('oomao:CacheDirectory','%s',message);end
+end
 t=tic;record=producer();value=validator(record);event.computeSeconds=toc(t);
 temporary=fullfile(fileparts(file),['pending-',char(java.util.UUID.randomUUID),'.mat']);
 cleanup=onCleanup(@()removeTemporary(temporary));t=tic;info=whos('record');
