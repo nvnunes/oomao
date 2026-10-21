@@ -1,10 +1,9 @@
 classdef oomaoExecution < handle
-%OOMAOEXECUTION Per-run CPU execution and science-diffraction precision.
-% fast selects C++ CPU kernels, sparse DM layout and reconstruction
+%OOMAOEXECUTION Per-run compiled execution and science-diffraction precision.
+% fast selects C++ kernels, sparse DM layout and reconstruction
 % regrouping. precision (32/64) sets science diffraction only; calibration,
 % atmosphere, control, detector noise and PSF accumulation stay double.
 % Omitted precision selects single science diffraction for fast execution.
-% This release implements CPU execution only.
     properties (SetAccess=private)
         Fast
         Backend
@@ -12,6 +11,9 @@ classdef oomaoExecution < handle
         Threads
     end
     properties (Access=private)
+        AtmosphereGeometry = []
+        Cuda = []
+        Mps = []
         AtmosphereDirectory = ''
         AtmospherePrefix = ''
         AtmosphereEvents = {}
@@ -51,11 +53,14 @@ classdef oomaoExecution < handle
                 error('oomao:InvalidFast','fast must be a scalar boolean.');
             end
             if ~((ischar(backend) && isrow(backend)) || (isstring(backend) && isscalar(backend)))
-                error('oomao:InvalidBackend','backend must be cpu.');
+                error('oomao:InvalidBackend','backend must be cpu, cuda or mps.');
             end
             backend = lower(string(backend));
-            if backend ~= "cpu"
-                error('oomao:BackendUnavailable','This release supports backend=cpu only.');
+            if ~any(backend == ["cpu","cuda","mps"])
+                error('oomao:BackendUnavailable','backend must be cpu, cuda or mps.');
+            end
+            if backend ~= "cpu" && ~fast
+                error('oomao:InvalidBackend','A non-CPU backend requires fast=true.');
             end
             if isempty(precision)
                 precision = 64 - 32*double(logical(fast));
@@ -65,6 +70,9 @@ classdef oomaoExecution < handle
             if ~(isnumeric(precision) && isreal(precision) && isscalar(precision) ...
                     && isfinite(precision) && any(precision == [32,64]))
                 error('oomao:InvalidPrecision','precision must be 32 or 64.');
+            end
+            if backend=="mps" && precision~=32
+                error('oomao:MpsPrecision','MPS science diffraction requires precision=32.');
             end
             if (ischar(threads) && isrow(threads)) || (isstring(threads) && isscalar(threads))
                 threads = str2double(threads);
@@ -80,6 +88,16 @@ classdef oomaoExecution < handle
             obj.Precision = double(precision);
         end
         function close(obj)
+            if ~isempty(obj.AtmosphereGeometry)
+                token=obj.AtmosphereGeometry;obj.AtmosphereGeometry=[];
+                oomao_fast_atmosphere_mex('destroy',token);
+            end
+            if ~isempty(obj.Mps)
+                backend=obj.Mps;obj.Mps=[];delete(backend);
+            end
+            if ~isempty(obj.Cuda)
+                backend=obj.Cuda;obj.Cuda=[];delete(backend);
+            end
             obj.clearCovarianceCache(false);
         end
         function delete(obj)
@@ -93,13 +111,26 @@ classdef oomaoExecution < handle
                             'Missing %s. Run buildFastKernels before fast=true.',name{1});
                     end
                 end
+                if strcmp(obj.Backend,'cuda') && isempty(obj.Cuda)
+                    obj.Cuda=oomaoCudaBackend(obj.Threads);
+                end
+                if strcmp(obj.Backend,'mps') && isempty(obj.Mps)
+                    obj.Mps=oomaoMpsBackend(obj.Threads);
+                end
             end
         end
         function out = projectAtmosphere(obj, varargin)
             if ~obj.Fast
                 error('oomao:InvalidDispatch','Baseline atmosphere uses the MATLAB relay.');
             end
-            out=oomao_fast_atmosphere_mex(varargin{:},obj.Threads);
+            if strcmp(obj.Backend,'cuda')
+                if isempty(obj.AtmosphereGeometry)
+                    obj.AtmosphereGeometry=oomao_fast_atmosphere_mex('create');
+                end
+                out=oomao_fast_atmosphere_mex(varargin{:},obj.Threads,obj.AtmosphereGeometry);
+            else
+                out=oomao_fast_atmosphere_mex(varargin{:},obj.Threads);
+            end
         end
         function out = formPupil(obj, amplitudes, phases, masks)
             if ~obj.Fast
@@ -108,10 +139,26 @@ classdef oomaoExecution < handle
             out = oomao_fast_pupil_mex(amplitudes, phases, masks,obj.Threads);
         end
         function out=diffractPupil(obj,amplitudes,phases,masks,phasor,nout,crop,start,precision)
+            if strcmp(obj.Backend,'cuda')
+                out=obj.Cuda.diffractPupil(amplitudes,phases,masks,phasor,nout,crop,start,precision);
+                return
+            end
+            if strcmp(obj.Backend,'mps')&&precision==32&&size(masks{1},1)>=64&&crop<=size(masks{1},1)/2
+                out=obj.Mps.diffractPupil(amplitudes,phases,masks,phasor,nout,crop,start);
+                return
+            end
             field=obj.prepareDiffraction(obj.formPupil(amplitudes,phases,masks),precision);
             out=obj.diffract(field,phasor,nout,crop,start);
         end
         function out = diffract(obj,field,phasor,nout,crop,start)
+            if strcmp(obj.Backend,'cuda')
+                out=obj.Cuda.diffract(field,phasor,nout,start,crop);
+                return
+            end
+            if strcmp(obj.Backend,'mps') && isa(field,'single') && size(field,1)>=64 && crop<=size(field,1)/2
+                out=obj.Mps.diffract(field,phasor,nout,start,crop);
+                return
+            end
             if size(field,1)>=64 && crop<=size(field,1)/2
                 out=oomao_fast_mft_mex(field,phasor,double(nout),double(start),double(crop),obj.Threads);
             else
@@ -126,15 +173,27 @@ classdef oomaoExecution < handle
 % False only triggers the existing value comparison, never invalidates data.
             same=oomao_fast_cpu_ops_mex(7,left,right);
         end
-        function out = sparseSurface(obj,transpose,coefs)
+        function plan = prepareSparseSurface(obj,transpose)
+            plan=[];
+            if strcmp(obj.Backend,'cuda'),plan=obj.Cuda.prepareSurface(transpose);end
+        end
+        function current=isCurrentSparseSurface(obj,plan)
+            current=~isempty(obj.Cuda)&&~isempty(plan)&&isvalid(plan)&&plan.isCurrent(obj.Cuda);
+        end
+        function out = sparseSurface(obj,transpose,coefs,plan)
+            if nargin>3 && ~isempty(plan),out=plan.apply(coefs);return;end
             out = oomao_fast_cpu_ops_mex(6,transpose,coefs,obj.Threads);
         end
         function out = shiftScreen(obj,image,residual)
             out = oomao_fast_cpu_ops_mex(5,image,residual,obj.Threads);
         end
-        function out = reconstruct(~,matrices,projector,slopes)
+        function out = reconstruct(obj,matrices,projector,slopes)
 % Apply each reconstructor followed by its command projector, in native order.
-            out=oomao_fast_cpu_ops_mex(2,matrices,projector,slopes);
+            if strcmp(obj.Backend,'cuda')
+                out=obj.Cuda.reconstruct(matrices,projector,slopes);
+            else
+                out=oomao_fast_cpu_ops_mex(2,matrices,projector,slopes);
+            end
         end
         function out = accumulate(obj,buffer,image)
 % Sum into a double detector buffer, converting science float32 imagelets.
